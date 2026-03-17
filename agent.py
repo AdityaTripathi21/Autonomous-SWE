@@ -35,7 +35,7 @@ def worker_node(state: CodeState):
     )
     return {"code": response.content}
 
-def test_creater(state: CodeState):
+def test_creator(state: CodeState):
     response = model.invoke(
         f"Create ONLY unit tests and functional tests for this code: {state['code']}"
     )
@@ -47,13 +47,6 @@ def test_runner(state: CodeState):
         return {"error": ""}    # no error, code ran fine
     except Exception as e:
         return {"error": str(e), "attempts": state["attempts"] + 1}   # capture the error message + attempt
-
-def review_node(state: CodeState):
-    try:
-        exec(state["code"])
-        return {"error": ""}       # no error, code ran fine
-    except Exception as e:
-        return {"error": str(e), "attempts": state["attempts"] + 1}   # capture the error message
     
 def bug_fixer(state: CodeState):
     response = model.invoke(
@@ -70,24 +63,45 @@ def router(state: CodeState):
         return "bug_fixer"
     
 
-    
+subgraph = StateGraph(CodeState)
 
-    
+subgraph.add_node("worker_node", worker_node)
+subgraph.add_node("test_creator", test_creator)
+subgraph.add_node("test_runner", test_runner)
+subgraph.add_node("bug_fixer", bug_fixer)
 
-graph = StateGraph(CodeState)
+subgraph.set_entry_point("worker_node")
 
-graph.add_node("taskNode", task_node)
-graph.add_node("workerNode", worker_node)
-graph.add_node("reviewNode", review_node)
+subgraph.add_edge("worker_node", "test_creator")
+subgraph.add_edge("test_creator", "test_runner")
 
-graph.set_entry_point("taskNode")
-
-graph.add_edge("taskNode", "workerNode")
-graph.add_edge("workerNode", "reviewNode")
-
-graph.add_conditional_edges("reviewNode", router, {
-    "worker_node": "workerNode",
+subgraph.add_conditional_edges("test_runner", router, {
+    "bug_fixer": "bug_fixer",
     "end": END
 })
 
-app = graph.compile()
+subgraph.add_edge("bug_fixer", "test_creator")
+
+engineer_agent = subgraph.compile()
+
+parent = StateGraph(CodeState)
+
+parent.add_node("task_node", task_node)
+parent.add_node("engineer_agent", engineer_agent)   # subgraph is a node
+
+parent.set_entry_point("task_node")
+parent.add_edge("task_node", "engineer_agent")
+parent.add_edge("engineer_agent", END)
+
+app = parent.compile()
+
+    
+result = app.invoke({
+    "task": "Write a function in Java that reverses a String",
+    "code": "",
+    "tests": "",
+    "error": "",
+    "attempts": 0
+})
+
+print(result["code"])
