@@ -1,7 +1,11 @@
+import subprocess
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
 from typing import TypedDict
 from dotenv import load_dotenv
+from tools.file_tools import list_files, read_file, write_file
+from langchain_core.tools import tool
+
 
 load_dotenv()
 
@@ -9,8 +13,13 @@ load_dotenv()
 
 model = ChatGroq(
     model="openai/gpt-oss-120b",
-    max_tokens=1000
+    max_tokens=4000
 )
+
+tools = [list_files, read_file, write_file]
+tools_by_name = {t.name: t for t in tools}
+
+model_with_tools = model.bind_tools(tools)
 
 # state for both parent and subgraph
 class CodeState(TypedDict):
@@ -31,27 +40,34 @@ def task_node(state: CodeState):
 
 def worker_node(state: CodeState):
     response = model.invoke(
-        f"Write code in the specified language only, no explanation, no markdown, no backticks: {state['task']}"
-    )
+        f"Write a simple, minimal Python implementation only. No helper utilities, no optional parameters, no benchmarks, no tests, no explanation, no markdown, no backticks. Just the core function(s): {state['task']}"    
+        )
+    write_file.invoke({"path": "src/main.py", "content": response.content})
     return {"code": response.content}
 
 def test_creator(state: CodeState):
     response = model.invoke(
-        f"Create ONLY unit tests and functional tests for this code: {state['code']}"
-    )
+        f"Write Python unit tests only using the unittest module. No explanation, no markdown, no backticks, no imports other than unittest and 'from src.main import *'. Tests only. Here is the code:\n{state['code']}"
+        )
     return {"tests": response.content}
 
 def test_runner(state: CodeState):
-    try:
-        exec(state["code"] + "\n" + state["tests"])
-        return {"error": ""}    # no error, code ran fine
-    except Exception as e:
-        return {"error": str(e), "attempts": state["attempts"] + 1}   # capture the error message + attempt
+    write_file.invoke({"path": "tests/test_main.py", "content": state["tests"]})
+    result = subprocess.run(
+        ["python3", "workspace/tests/test_main.py"],
+        capture_output=True,
+        text=True
+        )
+    if result.returncode != 0:
+        return {"error": result.stderr, "attempts": state["attempts"] + 1}
+    return {"error": ""}
+
     
 def bug_fixer(state: CodeState):
     response = model.invoke(
         f"Fix this code given these errors and tests. Return code only, no explanation, no markdown, no backticks.\nCode: {state['code']}\nError: {state['error']}\nTests: {state['tests']}"
     )
+    write_file.invoke({"path": "src/main.py", "content": response.content})
     return {"code": response.content}
     
 def router(state: CodeState):
@@ -96,12 +112,14 @@ parent.add_edge("engineer_agent", END)
 app = parent.compile()
 
     
-result = app.invoke({
-    "task": "Write a function in Java that reverses a String",
-    "code": "",
-    "tests": "",
-    "error": "",
-    "attempts": 0
-})
-
-print(result["code"])
+while True:
+    task = input("Enter task (or 'quit' to exit): ")
+    if task.lower() == "quit":
+        break
+    result = app.invoke({
+        "task": task,
+        "code": "",
+        "tests": "",
+        "error": "",
+        "attempts": 0
+    })

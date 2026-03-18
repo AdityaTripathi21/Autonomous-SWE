@@ -1,6 +1,8 @@
 from langchain_core.tools import tool
 from pathlib import Path
 
+# Note: This could be done with the FileManagementToolKit from LangChain, but I want to do it by myself for now
+
 WORKSPACE = Path("workspace").resolve()
 
 def _resolve_path(path:str) -> Path | str:
