@@ -1,5 +1,6 @@
 # AutonomousSWE
 
+Note: still in progress
 A self-correcting code generation agent built with LangGraph. Give it a task in plain English, and it writes code, generates tests, runs them, and fixes errors automatically.
 
 ## How it works
