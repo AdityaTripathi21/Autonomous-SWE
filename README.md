@@ -1,12 +1,14 @@
 # AutonomousSWE
 
 Note: still in progress
+
+
 A self-correcting code generation agent built with LangGraph. Give it a task in plain English, and it writes code, generates tests, runs them, and fixes errors automatically.
 
 ## How it works
 
 ```
-User input → Task planner → Engineer agent (subgraph) → README generator
+User input → Task planner → Engineer agent (subgraph)
                                     ↓
                             Worker (generates code)
                                     ↓
