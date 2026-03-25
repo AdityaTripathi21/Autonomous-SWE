@@ -1,10 +1,16 @@
+import ast
 import subprocess
+import sys
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
 from typing import TypedDict
 from dotenv import load_dotenv
 from tools.file_tools import list_files, read_file, write_file
 from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage, SystemMessage
+from langgraph.config import get_stream_writer
+
+
 
 
 load_dotenv()
@@ -26,50 +32,96 @@ class CodeState(TypedDict):
     task: str         
     code: str 
     tests: str        
-    error: str         
+    error: str  # latest error
+    errors: list
+    dependencies: list       
     attempts: int   
      
  
-    
+# planner code and returns task state    
 def task_node(state: CodeState):
-    response = model.invoke(
-         f"Break this coding task into clear requirements, specify language, complexity, and exact expected behavior: {state['task']}"
-    )
-    
+    response = model.invoke([
+        SystemMessage(content="You are a software requirements analyst. Break coding tasks into clear requirements, specify language, complexity, and exact expected behavior."),
+        HumanMessage(content=state["task"])
+    ])
     return {"task": response.content}
 
-def worker_node(state: CodeState):
-    response = model.invoke(
-        f"Write a simple, minimal Python implementation only. No helper utilities, no optional parameters, no benchmarks, no tests, no explanation, no markdown, no backticks. Just the core function(s): {state['task']}"    
+# extracts dependencies from code using AST
+def extract_dependencies(code: str) -> list[str]:
+    tree = ast.parse(code)
+    imports = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for n in node.names:
+                imports.add(n.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                imports.add(node.module.split(".")[0])
+
+    # remove standard library modules
+    return [m for m in imports if m not in sys.stdlib_module_names]
+
+# installs dependencies in main and test file
+def dependency_node(state: CodeState):
+    combined_code = state["code"] + "\n" + state["tests"]
+
+    try:
+        packages = extract_dependencies(combined_code)
+    except Exception:
+        return {"dependencies": []}
+
+    installed = []
+    for package in packages:
+        result = subprocess.run(
+            ["pip", "install", "--quiet", package],
+            capture_output=True,
+            text=True
         )
+
+        if result.returncode == 0:
+            installed.append(package)
+
+    return {"dependencies": installed}
+
+# writes code given task and writes code to main.py and returns code state
+def worker_node(state: CodeState):
+    response = model.invoke([
+        SystemMessage(content="You are an expert Python engineer. You write clean, minimal, correct code. You never include explanations, markdown, backticks, or tests in your output. Code only."),   # SysMessage for instructions
+        HumanMessage(content=f"Write code for this task: {state['task']}")  # The input
+    ])
     write_file.invoke({"path": "src/main.py", "content": response.content})
     return {"code": response.content}
 
+# tests get created here, however they aren't written, instead they are stored in state and given to the test_runner
 def test_creator(state: CodeState):
-    response = model.invoke(
-        f"Write Python unit tests only using the unittest module. No explanation, no markdown, no backticks, no imports other than unittest and 'from src.main import *'. Tests only. Here is the code:\n{state['code']}"
-        )
+    response = model.invoke([
+        SystemMessage(content="You are an expert Python test engineer. You write unit tests using only the unittest module. No explanation, no markdown, no backticks. Only import unittest and 'from src.main import *'. Tests only."),
+        HumanMessage(content=f"Write unit tests for this code:\n{state['code']}")
+    ])
     return {"tests": response.content}
 
+# tests are written using write_file, and then they're run, if errors, error, errors, attempt is returned, otherwise, just empty error
 def test_runner(state: CodeState):
     write_file.invoke({"path": "tests/test_main.py", "content": state["tests"]})
     result = subprocess.run(
         ["python3", "workspace/tests/test_main.py"],
         capture_output=True,
         text=True
-        )
+    )
     if result.returncode != 0:
-        return {"error": result.stderr, "attempts": state["attempts"] + 1}
+        return {"error": result.stderr, "errors": state["errors"] + [result.stderr], "attempts": state["attempts"] + 1}
     return {"error": ""}
 
-    
+# Fixes code given the code, errors, error (latest), and tests, writes to main.py, and returns code as state
 def bug_fixer(state: CodeState):
-    response = model.invoke(
-        f"Fix this code given these errors and tests. Return code only, no explanation, no markdown, no backticks.\nCode: {state['code']}\nError: {state['error']}\nTests: {state['tests']}"
-    )
+    response = model.invoke([
+        SystemMessage(content="You are an expert Python debugger. You fix code based on errors and failing tests. Return fixed code only, no explanation, no markdown, no backticks."),
+        HumanMessage(content=f"Fix this code.\nCode: {state['code']}\nAll previous errors in order: {state['errors']}\nLatest error: {state['error']}\nTests: {state['tests']}")    ])
     write_file.invoke({"path": "src/main.py", "content": response.content})
     return {"code": response.content}
-    
+
+# router for conditional edge, if no error, end the loop, if attempts >= 3, end the loop, otherwise loop to bug_fixer    
 def router(state: CodeState):
     if state["error"] == "":
         return "end"
@@ -81,6 +133,7 @@ def router(state: CodeState):
 
 subgraph = StateGraph(CodeState)
 
+subgraph.add_node("dependency_node", dependency_node)
 subgraph.add_node("worker_node", worker_node)
 subgraph.add_node("test_creator", test_creator)
 subgraph.add_node("test_runner", test_runner)
@@ -89,14 +142,15 @@ subgraph.add_node("bug_fixer", bug_fixer)
 subgraph.set_entry_point("worker_node")
 
 subgraph.add_edge("worker_node", "test_creator")
-subgraph.add_edge("test_creator", "test_runner")
+subgraph.add_edge("test_creator", "dependency_node")
+subgraph.add_edge("dependency_node", "test_runner")
 
 subgraph.add_conditional_edges("test_runner", router, {
     "bug_fixer": "bug_fixer",
     "end": END
 })
 
-subgraph.add_edge("bug_fixer", "test_creator")
+subgraph.add_edge("bug_fixer", "test_runner")
 
 engineer_agent = subgraph.compile()
 
@@ -121,5 +175,7 @@ while True:
         "code": "",
         "tests": "",
         "error": "",
+        "errors": [],
+        "dependencies": [],
         "attempts": 0
     })

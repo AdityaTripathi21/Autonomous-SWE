@@ -1,62 +1,111 @@
 import unittest
+import sys
+import io
 from unittest import mock
 from src.main import *
 
-class TestQuitListener(unittest.TestCase):
+class TestArithmeticFunctions(unittest.TestCase):
+    def test_add(self):
+        self.assertEqual(add(2, 3), 5)
+        self.assertAlmostEqual(add(2.5, 3.1), 5.6)
+
+    def test_sub(self):
+        self.assertEqual(sub(5, 3), 2)
+        self.assertAlmostEqual(sub(5.5, 2.2), 3.3)
+
+    def test_mul(self):
+        self.assertEqual(mul(4, 2), 8)
+        self.assertAlmostEqual(mul(1.5, 2), 3.0)
+
+    def test_div(self):
+        self.assertEqual(div(10, 2), 5)
+        self.assertAlmostEqual(div(7, 2), 3.5)
+
+    def test_div_zero(self):
+        with self.assertRaises(ZeroDivisionError):
+            div(5, 0)
+
+class TestParseInput(unittest.TestCase):
+    def test_empty(self):
+        self.assertEqual(parse_input("   "), ("", []))
+
+    def test_single_command(self):
+        self.assertEqual(parse_input("HELP"), ("help", []))
+
+    def test_command_with_args(self):
+        self.assertEqual(parse_input("Add  2   3"), ("add", ["2", "3"]))
+
+    def test_case_insensitivity(self):
+        self.assertEqual(parse_input("QuIt"), ("quit", []))
+
+class TestPrintFunctions(unittest.TestCase):
+    def test_print_help(self):
+        captured = io.StringIO()
+        with mock.patch('sys.stdout', new=captured):
+            print_help()
+        output = captured.getvalue()
+        self.assertIn("Available commands:", output)
+        self.assertIn("add a b", output)
+
+    def test_print_error(self):
+        captured = io.StringIO()
+        with mock.patch('sys.stdout', new=captured):
+            print_error("Something went wrong")
+        self.assertEqual(captured.getvalue().strip(), "Error: Something went wrong")
+
+class TestExecuteCommand(unittest.TestCase):
     def setUp(self):
-        self.original_argv = sys.argv[:]
+        self.stdout_patcher = mock.patch('sys.stdout', new_callable=io.StringIO)
+        self.mock_stdout = self.stdout_patcher.start()
+        self.addCleanup(self.stdout_patcher.stop)
 
-    def tearDown(self):
-        sys.argv = self.original_argv
+    def test_help_command(self):
+        execute_command('help', [])
+        self.assertIn("Available commands:", self.mock_stdout.getvalue())
 
-    def test_help_argument(self):
-        sys.argv = ['quit_listener.py', '-h']
-        with mock.patch('builtins.print') as mock_print:
-            ret = main()
-        self.assertEqual(ret, 0)
-        mock_print.assert_any_call("Read lines from stdin until the word 'quit' is entered.\nUsage: quit_listener.py [-h|--help]")
+    def test_unknown_command(self):
+        execute_command('foobar', [])
+        self.assertIn("Error: Unknown command", self.mock_stdout.getvalue())
 
-    def test_quit_immediately(self):
-        sys.argv = ['quit_listener.py']
-        with mock.patch('builtins.input', side_effect=['quit']):
-            with mock.patch('builtins.print') as mock_print:
-                ret = main()
-        self.assertEqual(ret, 0)
-        # No "You typed" should be printed
-        calls = [c.args[0] for c in mock_print.call_args_list]
-        self.assertTrue(all("You typed:" not in arg for arg in calls))
+    def test_missing_arguments(self):
+        execute_command('add', ['1'])
+        self.assertIn("Error: Expected two arguments", self.mock_stdout.getvalue())
 
-    def test_typing_and_quit(self):
-        sys.argv = ['quit_listener.py']
-        inputs = ['hello world', 'quit']
-        with mock.patch('builtins.input', side_effect=inputs):
-            with mock.patch('builtins.print') as mock_print:
-                ret = main()
-        self.assertEqual(ret, 0)
-        # Verify the echoed line appears
-        mock_print.assert_any_call('You typed: hello world')
+    def test_non_numeric_arguments(self):
+        execute_command('sub', ['a', 'b'])
+        self.assertIn("Error: Non-numeric argument", self.mock_stdout.getvalue())
 
-    def test_eof_handling(self):
-        sys.argv = ['quit_listener.py']
-        with mock.patch('builtins.input', side_effect=EOFError):
-            with mock.patch('builtins.print') as mock_print:
-                ret = main()
-        self.assertEqual(ret, 0)
-        # No error printed
-        mock_print.assert_not_called()
+    def test_division_by_zero(self):
+        execute_command('div', ['10', '0'])
+        self.assertIn("Error: Division by zero", self.mock_stdout.getvalue())
 
-    def test_unexpected_exception(self):
-        sys.argv = ['quit_listener.py']
-        # Force an unexpected exception inside the loop
-        def raise_exc(_):
-            raise RuntimeError('boom')
-        with mock.patch('builtins.input', side_effect=raise_exc):
-            with mock.patch('sys.stderr', new_callable=mock.Mock) as mock_stderr:
-                ret = main()
-        self.assertEqual(ret, 1)
-        mock_stderr.write.assert_called()
-        written = ''.join(call.args[0] for call in mock_stderr.write.call_args_list)
-        self.assertIn('Error: boom', written)
+    def test_successful_add(self):
+        execute_command('add', ['2', '3'])
+        self.assertIn("5.0", self.mock_stdout.getvalue())
+
+    def test_successful_sub(self):
+        execute_command('-', ['5', '2'])
+        self.assertIn("3.0", self.mock_stdout.getvalue())
+
+    def test_successful_mul(self):
+        execute_command('*', ['4', '2.5'])
+        self.assertIn("10.0", self.mock_stdout.getvalue())
+
+    def test_successful_div(self):
+        execute_command('/', ['9', '3'])
+        self.assertIn("3.0", self.mock_stdout.getvalue())
+
+    def test_quit_command_exits(self):
+        with mock.patch('sys.exit', side_effect=SystemExit) as mock_exit:
+            with self.assertRaises(SystemExit):
+                execute_command('quit', [])
+            mock_exit.assert_called_once_with(0)
+            self.assertIn("Good‑bye!", self.mock_stdout.getvalue())
+
+    def test_exit_alias(self):
+        with mock.patch('sys.exit', side_effect=SystemExit):
+            with self.assertRaises(SystemExit):
+                execute_command('q', [])
 
 if __name__ == '__main__':
     unittest.main()
